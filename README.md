@@ -1,0 +1,2 @@
+# IPF
+Iterative proportional fitting
