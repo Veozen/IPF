@@ -1,33 +1,53 @@
-import duckdb
-
 #Iterative proportional fitting
-
 import duckdb
 import pandas as pd
+import itertools
+from itertools import combinations
+import numpy as np
 
-def agg_by_duckdb(con, df: pd.DataFrame, by, var, id):
+def generate_random_table(n_dim,n_cat,scale=1):
+  #generate n_dim columns each with n_cat values
+  sets = [set(range(n_cat)) for _ in range(n_dim)]
+  cartesian_product = list(itertools.product(*sets))
+  df = pd.DataFrame(cartesian_product, columns=[*range(n_dim)])
+  #generate random values between 0 and scale
+  df["value"] = np.random.rand(len(df)) * scale
+  return df
+
+
+def get_unique_col_name(df, base_name):
+  # Generate a unique column name
+  i = 1
+  new_name = base_name
+  while new_name in df.columns:
+      new_name = f"{base_name}_{i}"
+      i += 1   
+  return new_name
+
+
+def agg_by_sql(df: pd.DataFrame, by, var, id):
     if by is None or not by:
         # Aggregate over the entire dataset
         query = f"""
         SELECT 
             SUM({var}) AS {var},
             LIST({id}) AS {id}
-        FROM df
+        FROM 'df'
         """
     else:
         # Aggregate with grouping
-        group_by_columns = ", ".join(by)
+        group_by_columns = ", ".join(map(lambda x: '"'+str(x)+'"' if isinstance(x, int) else str(x) , by))
         query = f"""
         SELECT 
             {group_by_columns},
             SUM({var}) AS {var},
             LIST({id}) AS {id}
-        FROM df
+        FROM 'df'
         GROUP BY {group_by_columns}
         """
-
     # Execute the query
-    df_agg = con.execute(query).fetchdf()
+    with duckdb.connect() as con:
+      df_agg = con.execute(query).fetchdf()
     return df_agg
 
 
@@ -48,7 +68,7 @@ def aggregate_and_list(df:pd.DataFrame, by, var=None, margins=None, id=None):
         
     df_out = pd.DataFrame()
     for sub in subsets:
-        sub_agg = agg_by(df, by=sub, var=var, id=id)
+        sub_agg = agg_by_sql(df, by=sub, var=var, id=id)
         df_out = pd.concat([df_out,sub_agg],ignore_index=True)
     return df_out  
 
@@ -85,21 +105,11 @@ def aggregate_table(df_in, by, var, margins=None):
   cons_id_name              = get_unique_col_name(df_margins,"cons_id")
   df_margins[cons_id_name]  = range(len(df_margins))
   n_margins                 = len(df_margins)
-
-  # create a mapping of each margin identifer to each aggregated value 
-  constraint_values    = {}    
-  for index, row in df_margins[[cons_id_name, var]].iterrows():
-    constraint_values[row[cons_id_name]] = row[var]
   
   # create a mapping of each margin identifer to a list of each cell identifer adding up to it
-  constraints           = {}
-  for index, row in df_margins[[cons_id_name,cell_id_name]].iterrows():
-    constraints[row[cons_id_name]] = row[cell_id_name]
+  constraints = df_margins.explode(cell_id_name).reset_index(drop=True)
   
-  # create a mapping of each cell to a list of margins this cell will be aggreagated to
-  cell_id_constraints = {cell_id:[cons_id for cons_id in constraints if cell_id in constraints[cons_id]] for cell_id in cell_id_lst}
-  
-  return 
+  return by_values, constraints[[cell_id_name,cons_id_name]]
   
   
 def get_discrepancy(con):
@@ -162,8 +172,11 @@ def get_discrepancy(con):
   maxDiscrepancy = con.execute("SELECT max(abs(diff)) FROM wrk_discrepancies ;").fetchone()[0]
 	return maxDiscrepancy
 
+
+
+
 @timer
-def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weight", db_file=None, tol=1, maxIter=100):
+def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weight", cons_id="cons_id", db_file=None, tol=1, maxIter=100):
   """
   input: table
       Thif table lists all the cells or units in a table whose value will be adjusted by Iterative proportional fitting along with boundaries whose adjusted value is meant to stay within.
