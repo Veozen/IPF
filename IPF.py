@@ -2,7 +2,6 @@
 import duckdb
 import pandas as pd
 from itertools import combinations
-import numpy as np
 
 def get_unique_col_name(df, base_name):
   # Generate a unique column name
