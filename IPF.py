@@ -1,7 +1,6 @@
 #Iterative proportional fitting
 import duckdb
 import pandas as pd
-import itertools
 from itertools import combinations
 import numpy as np
 
