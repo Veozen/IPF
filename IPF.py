@@ -1,7 +1,21 @@
 #Iterative proportional fitting
 import duckdb
 import pandas as pd
+import itertools
 from itertools import combinations
+import functools
+from time import perf_counter
+import numpy as np
+
+def generate_random_table(n_dim,n_cat,scale=1):
+  #generate n_dim columns each with n_cat values
+  sets = [set(range(n_cat)) for _ in range(n_dim)]
+  cartesian_product = list(itertools.product(*sets))
+  df = pd.DataFrame(cartesian_product, columns=[*range(n_dim)])
+  #generate random values between 0 and scale
+  df["value"] = np.random.rand(len(df)) * scale
+  return df
+
 
 def get_unique_col_name(df, base_name):
   # Generate a unique column name
@@ -11,6 +25,7 @@ def get_unique_col_name(df, base_name):
       new_name = f"{base_name}_{i}"
       i += 1   
   return new_name
+
 
 def agg_by_sql(df: pd.DataFrame, by, var, id):
     if by is None or not by:
@@ -96,7 +111,7 @@ def aggregate_table(df_in, by, var, margins=None):
   # create a mapping of each margin identifer to a list of each cell identifer adding up to it
   constraints = df_margins.explode(cell_id_name).reset_index(drop=True)
   
-  return by_values, constraints[[cell_id_name,cons_id_name]]
+  return by_values, df_margins.drop([cell_id_name],axis=1), constraints[[cell_id_name,cons_id_name]]
   
   
 def get_discrepancy(con):
@@ -114,25 +129,23 @@ def get_discrepancy(con):
       value maxDiscrepancy
       
   """
-	con.execute(f"""
-		CREATE table wrk_constraints AS
-		SELECT a.cons_id,  sum(b.weight)  as aggregated_weight_per_constraint
-		FROM wrk_input_constraints AS a 
+  con.execute(f"""
+    CREATE table wrk_constraints AS
+    SELECT a.cons_id,  sum(b.weight)  as aggregated_weight_per_constraint
+    FROM wrk_input_constraints AS a 
     LEFT JOIN wrk_weights AS b
-		ON a.unit_id=b.unit_id
-		GROUP by a.cons_id
-		;
-	""")
-
-	con.execute(f"""
-		CREATE table wrk_discrepancy AS
-		SELECT a.*,b.aggregated_weight_per_constraint as target_approximation
-		FROM wrk_input_targets AS a 
+    ON a.unit_id=b.unit_id
+    GROUP by a.cons_id
+    ;
+  """)
+  con.execute(f"""
+    CREATE table wrk_discrepancy AS
+    SELECT a.*,b.aggregated_weight_per_constraint as target_approximation
+    FROM wrk_input_targets AS a 
     LEFT JOIN wrk_constraints AS b
-		ON a.cons_id = b.cons_id
-		;
-	""")
-
+    ON a.cons_id = b.cons_id
+    ;
+  """)
   con.execute("""
     CREATE TABLE wrk_discrepancies AS
     SELECT *,
@@ -155,12 +168,20 @@ def get_discrepancy(con):
                     END;
     ;
     """)
-   
   maxDiscrepancy = con.execute("SELECT max(abs(diff)) FROM wrk_discrepancies ;").fetchone()[0]
-	return maxDiscrepancy
+  return maxDiscrepancy
 
 
-
+def timer(func):
+  @functools.wraps(func)
+  def wrapper_timer(*args, **kwargs):
+    tic = perf_counter()
+    value = func(*args, **kwargs)
+    toc = perf_counter()
+    elapsed_time = toc - tic
+    print(f"Elapsed time: {elapsed_time:0.4f} seconds")
+    return value
+  return wrapper_timer
 
 @timer
 def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weight", cons_id="cons_id", db_file=None, tol=1, maxIter=100):
@@ -196,12 +217,12 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
   print("Calibration")
   print("-----------")
   print()
-
+  
   with duckdb.connect() as con:
     # Collect the values from dataset &targets
-    n_units       = duckdb.execute(f"SELECT COUNT(DISTINCT unit_id ) FROM '{input}';").fetchone()[0]
-    n_var         = duckdb.execute(f"SELECT COUNT(DISTINCT cons_id ) FROM '{constraints}';").fetchone()[0]
-
+    n_units       = con.execute(f"SELECT COUNT(DISTINCT unit_id ) FROM input;").fetchone()[0]
+    n_var         = con.execute(f"SELECT COUNT(DISTINCT cons_id ) FROM constraints;").fetchone()[0]
+    
     print(f"Number of equations: {n_var}")
     print(f"Number of units    : {n_units}")
     print()
@@ -210,28 +231,28 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
     con.execute(f"""
     CREATE TABLE wrk_weights AS
     SELECT unit_id, weight, lb, ub
-    FROM '{input}'
+    FROM input
     """)
     
     # read in the constraints
     con.execute(f"""
     CREATE TABLE wrk_input_constraints AS
     SELECT unit_id, cons_id
-    FROM '{constraints}'
+    FROM constraints
     """)
     
     # read in the target values for the constraints
     con.execute(f"""
     CREATE TABLE wrk_input_targets AS
     SELECT cons_id, cons_type, target
-    FROM '{targets}'
+    FROM targets
     """)
     
     # get the initial state of adjustment between the margins and the target margins
     maxDiscrepancy  = tol
     maxDiscrepancy  = get_discrepancy(con)
     print(f"Initial max discrepancy : {maxDiscrepancy} ")
-      
+    
     n_iter = 0
     while ( ( (maxDiscrepancy >= tol) and (n_iter <= maxIter) ) ):
       # for each unit_id, fetch the adjustment required by the constraint
@@ -243,7 +264,7 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
         ON a.cons_id = b.cons_id
         ;
       """)
-
+      
       # compute the geometric mean of the adjustements to be made
       con.execute(f"""
         CREATE TABLE wrk_unit_adjustement AS
@@ -251,7 +272,7 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
         FROM wrk_constraints 
         GROUP BY unit_id
       """)
-
+      
       # adjust the weights
       con.execute(f"""
         CREATE TABLE wrk_weights AS
@@ -260,7 +281,7 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
         LEFT JOIN wrk_unit_adjustement as b
         ON a.unit_id = b.unit_id
       """)
-
+      
       # make sure the values are within bounds*/
       con.execute("""
       CREATE TABLE wrk_weights AS
@@ -268,37 +289,13 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
       FROM wrk_weights
       EXCLUDE weight_;
       """)
-
+      
       maxDiscrepancy = get_discrepancy(con)
-
+      
       print(f"iteration {n_iter} : {maxDiscrepancy}") 
       n_iter += 1
-	
+      
   return duckdb.execute("SELECT * FROM wrk_weights").fetchdf()
   
-
-
-
-"""
-
-    #cons_id       = duckdb.execute(f"SELECT STRING_AGG(cons_id, ' ') FROM '{targets}';").fetchone()[0]
-    #targetValues  = duckdb.execute(f"SELECT STRING_AGG(target, ' ') FROM '{targets}';").fetchone()[0]
-    
-    # get the column names that are not unit_id
-    #constraints_column_names  = duckdb.execute("SELECT column_name FROM information_schema.columns WHERE table_name = '{constraints}';").fetchdf()["column_name"].tolist()
-    #constraints_column_names  = [x for x in constraints_column_names if x != unit_id]
-    #n_var                     = len(constraints_column_names)
-
-
-    #Check the input constraints to make sure the weights are all either 1 or 0
-    #condition             = " AND ".join([f"EVERY({col} IN (0, 1))" for col in constraints_column_names ])
-    #n_invalid_rows_query  = f"SELECT COUNT(*) FROM '{constraints}' WHERE NOT ({condition});"
-    #n_invalid_rows        = duckdb.execute(n_invalid_rows_query).fetchdf()
-
-    #if not n_invalid_rows > 0:
-    #    print(f"Error: Coefficients in file {constraints} have to be either 0 or 1")
-    
-    
-"""
 
 
