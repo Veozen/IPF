@@ -184,7 +184,7 @@ def timer(func):
   return wrapper_timer
 
 @timer
-def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weight", cons_id="cons_id", db_file=None, tol=1, maxIter=100):
+def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weight", cons_id="cons_id", lb=None, ub=None, db_file=None, tol=1, maxIter=100):
   """
   input: table
       Thif table lists all the cells or units in a table whose value will be adjusted by Iterative proportional fitting along with boundaries whose adjusted value is meant to stay within.
@@ -228,9 +228,15 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
     print()
     
     # set up the working table of weights to be adjusted
+    sql_select = f"SELECT unit_id, {var} as weight"
+    if lb:
+      sql_select += ", lb"
+    if ub:
+      sql_select += ", ub"
+    
     con.execute(f"""
     CREATE TABLE wrk_weights AS
-    SELECT unit_id, weight, lb, ub
+    {sql_select}
     FROM input
     """)
     
@@ -276,19 +282,27 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
       # adjust the weights
       con.execute(f"""
         CREATE TABLE wrk_weights AS
-        SELECT a.*, a.weight*b.adjust  as weight_
+        SELECT a.*, a.weight*b.adjust  as weight
         FROM wrk_weights as a 
         LEFT JOIN wrk_unit_adjustement as b
         ON a.unit_id = b.unit_id
       """)
       
       # make sure the values are within bounds*/
-      con.execute("""
-      CREATE TABLE wrk_weights AS
-      SELECT *, LEAST(GREATEST(weight_, lb), ub) AS weight
-      FROM wrk_weights
-      EXCLUDE weight_;
-      """)
+      if lb :
+           con.execute("""
+        CREATE TABLE wrk_weights AS
+        SELECT *, GREATEST(weight, lb) AS weight
+        FROM wrk_weights
+        EXCLUDE weight_;
+        """)
+      if ub:
+        con.execute("""
+        CREATE TABLE wrk_weights AS
+        SELECT *, LEAST(weight, ub) AS weight
+        FROM wrk_weights
+        EXCLUDE weight_;
+        """)
       
       maxDiscrepancy = get_discrepancy(con)
       
