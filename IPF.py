@@ -112,8 +112,8 @@ def aggregate_table(df_in, by, var, margins=None):
   constraints = df_margins.explode(cell_id_name).reset_index(drop=True)
   
   return by_values, df_margins.drop([cell_id_name],axis=1), constraints[[cell_id_name,cons_id_name]]
-  
-  
+
+
 def get_discrepancy(con):
   """
     returns the discrepancies between then aggregated margins and their target values
@@ -139,7 +139,7 @@ def get_discrepancy(con):
     ;
   """)
   con.execute(f"""
-    CREATE table wrk_discrepancy AS
+    CREATE table wrk_discrepancies AS
     SELECT a.*,b.aggregated_weight_per_constraint as target_approximation
     FROM wrk_input_targets AS a 
     LEFT JOIN wrk_constraints AS b
@@ -147,7 +147,7 @@ def get_discrepancy(con):
     ;
   """)
   con.execute("""
-    CREATE TABLE wrk_discrepancies AS
+    CREATE OR REPLACE TABLE wrk_discrepancies AS
     SELECT *,
            -- Step 1: Compute diff and adjustement
            target - target_approximation AS diff,
@@ -157,13 +157,13 @@ def get_discrepancy(con):
     -- Step 2: Apply constraints on adjustement and diff
     UPDATE wrk_discrepancies
     SET adjustement = CASE 
-                          WHEN constype = 'le' AND adjustement > 1 THEN 1
-                          WHEN constype = 'ge' AND adjustement < 1 THEN 1
+                          WHEN cons_type = 'le' AND adjustement > 1 THEN 1
+                          WHEN cons_type = 'ge' AND adjustement < 1 THEN 1
                           ELSE adjustement
                      END,
         diff        = CASE 
-                          WHEN constype = 'le' AND adjustement > 1 THEN 0
-                          WHEN constype = 'ge' AND adjustement < 1 THEN 0
+                          WHEN cons_type = 'le' AND adjustement > 1 THEN 0
+                          WHEN cons_type = 'ge' AND adjustement < 1 THEN 0
                           ELSE diff
                     END;
     ;
@@ -184,7 +184,18 @@ def timer(func):
   return wrapper_timer
 
 @timer
-def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weight", cons_id="cons_id", lb=None, ub=None, db_file=None, tol=1, maxIter=100):
+def IPF(input=None, 
+        constraints=None, 
+        targets=None, 
+        unit_id="unit_id", 
+        var="weight", 
+        cons_id="cons_id", 
+        lb=None, 
+        ub=None, 
+        cons_type=None,
+        db_file=None, 
+        tol=1, 
+        maxIter=100):
   """
   input: table
       Thif table lists all the cells or units in a table whose value will be adjusted by Iterative proportional fitting along with boundaries whose adjusted value is meant to stay within.
@@ -248,9 +259,12 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
     """)
     
     # read in the target values for the constraints
+    sql_select = f"SELECT cons_id, 'eq' as cons_type, target"
+    if cons_type:
+      sql_select = f"SELECT cons_id, {cons_type}, target"
     con.execute(f"""
     CREATE TABLE wrk_input_targets AS
-    SELECT cons_id, cons_type, target
+    {sql_select}
     FROM targets
     """)
     
@@ -261,44 +275,45 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
     
     n_iter = 0
     while ( ( (maxDiscrepancy >= tol) and (n_iter <= maxIter) ) ):
+      print("step0")
       # for each unit_id, fetch the adjustment required by the constraint
       con.execute(f"""
-        CREATE TABLE wrk_constraints as
+        CREATE OR REPLACE TABLE wrk_constraints as
         SELECT a.*, b.adjustement
         FROM wrk_constraints as a 
         LEFT JOIN wrk_discrepancies as b
         ON a.cons_id = b.cons_id
         ;
       """)
-      
+      print("step1")
       # compute the geometric mean of the adjustements to be made
       con.execute(f"""
-        CREATE TABLE wrk_unit_adjustement AS
+        CREATE OR REPLACE TABLE wrk_unit_adjustement AS
         SELECT unit_id, exp(mean(log(adjustement))) as adjust
         FROM wrk_constraints 
         GROUP BY unit_id
       """)
-      
+      print("step2")
       # adjust the weights
       con.execute(f"""
-        CREATE TABLE wrk_weights AS
+        CREATE OR REPLACE TABLE wrk_weights AS
         SELECT a.*, a.weight*b.adjust  as weight
         FROM wrk_weights as a 
         LEFT JOIN wrk_unit_adjustement as b
         ON a.unit_id = b.unit_id
       """)
-      
+      print("step3")
       # make sure the values are within bounds*/
       if lb :
            con.execute("""
-        CREATE TABLE wrk_weights AS
+        CREATE OR REPLACE TABLE wrk_weights AS
         SELECT *, GREATEST(weight, lb) AS weight
         FROM wrk_weights
         EXCLUDE weight_;
         """)
       if ub:
         con.execute("""
-        CREATE TABLE wrk_weights AS
+        CREATE OR REPLACE TABLE wrk_weights AS
         SELECT *, LEAST(weight, ub) AS weight
         FROM wrk_weights
         EXCLUDE weight_;
@@ -309,7 +324,6 @@ def IPF(input=None, constraints=None, targets=None, unit_id="unit_id", var="weig
       print(f"iteration {n_iter} : {maxDiscrepancy}") 
       n_iter += 1
       
-  return duckdb.execute("SELECT * FROM wrk_weights").fetchdf()
+    return con.execute("SELECT * FROM wrk_weights").fetchdf()
   
-
 
