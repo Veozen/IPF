@@ -130,7 +130,7 @@ def get_discrepancy(con):
       
   """
   con.execute(f"""
-    CREATE table wrk_constraints AS
+    CREATE OR REPLACE TABLE wrk_constraints AS
     SELECT a.cons_id,  sum(b.weight)  as aggregated_weight_per_constraint
     FROM wrk_input_constraints AS a 
     LEFT JOIN wrk_weights AS b
@@ -139,8 +139,8 @@ def get_discrepancy(con):
     ;
   """)
   con.execute(f"""
-    CREATE table wrk_discrepancies AS
-    SELECT a.*,b.aggregated_weight_per_constraint as target_approximation
+    CREATE OR REPLACE TABLE wrk_discrepancies AS
+    SELECT a.cons_id, a.cons_type, a.target, b.aggregated_weight_per_constraint as target_approximation
     FROM wrk_input_targets AS a 
     LEFT JOIN wrk_constraints AS b
     ON a.cons_id = b.cons_id
@@ -239,7 +239,7 @@ def IPF(input=None,
     print()
     
     # set up the working table of weights to be adjusted
-    sql_select = f"SELECT unit_id, {var} as weight"
+    sql_select = f"SELECT {unit_id} as unit_id, {var} as weight"
     if lb:
       sql_select += ", lb"
     if ub:
@@ -275,17 +275,15 @@ def IPF(input=None,
     
     n_iter = 0
     while ( ( (maxDiscrepancy >= tol) and (n_iter <= maxIter) ) ):
-      print("step0")
       # for each unit_id, fetch the adjustment required by the constraint
       con.execute(f"""
         CREATE OR REPLACE TABLE wrk_constraints as
         SELECT a.*, b.adjustement
-        FROM wrk_constraints as a 
+        FROM wrk_input_constraints as a 
         LEFT JOIN wrk_discrepancies as b
         ON a.cons_id = b.cons_id
         ;
       """)
-      print("step1")
       # compute the geometric mean of the adjustements to be made
       con.execute(f"""
         CREATE OR REPLACE TABLE wrk_unit_adjustement AS
@@ -293,16 +291,14 @@ def IPF(input=None,
         FROM wrk_constraints 
         GROUP BY unit_id
       """)
-      print("step2")
       # adjust the weights
       con.execute(f"""
         CREATE OR REPLACE TABLE wrk_weights AS
-        SELECT a.*, a.weight*b.adjust  as weight
+        SELECT a.* EXCLUDE weight, a.weight*b.adjust  as weight
         FROM wrk_weights as a 
         LEFT JOIN wrk_unit_adjustement as b
         ON a.unit_id = b.unit_id
       """)
-      print("step3")
       # make sure the values are within bounds*/
       if lb :
            con.execute("""
@@ -326,4 +322,3 @@ def IPF(input=None,
       
     return con.execute("SELECT * FROM wrk_weights").fetchdf()
   
-
